@@ -33,6 +33,12 @@ wifi:
 
 captive_portal:
 
+globals:
+  - id: timer_remaining_seconds
+    type: int
+    restore_value: false
+    initial_value: "0"
+
 script:
   - id: toggle_oscilating
     mode: queued
@@ -42,6 +48,95 @@ script:
           auto call = id(smart_fan).make_call();
           call.set_oscillating(!oscilating);
           call.perform();
+
+  - id: update_timer_indicators
+    mode: single
+    then:
+      - lambda: |-
+          int display_minutes = 0;
+          if (id(timer_remaining_seconds) > 0) {
+            display_minutes = ((id(timer_remaining_seconds) + 1799) / 1800) * 30;
+          }
+
+          id(timer_duration_number).publish_state(display_minutes);
+
+      - if:
+          condition:
+            lambda: return id(timer_remaining_seconds) > 0 && (((id(timer_remaining_seconds) + 1799) / 1800) & 0x1);
+          then:
+            - output.turn_on: timer_0_5h_indicator
+          else:
+            - output.turn_off: timer_0_5h_indicator
+
+      - if:
+          condition:
+            lambda: return id(timer_remaining_seconds) > 0 && (((id(timer_remaining_seconds) + 1799) / 1800) & 0x2);
+          then:
+            - output.turn_on: timer_1h_indicator
+          else:
+            - output.turn_off: timer_1h_indicator
+
+      - if:
+          condition:
+            lambda: return id(timer_remaining_seconds) > 0 && (((id(timer_remaining_seconds) + 1799) / 1800) & 0x4);
+          then:
+            - output.turn_on: timer_2h_indicator
+          else:
+            - output.turn_off: timer_2h_indicator
+
+      - if:
+          condition:
+            lambda: return id(timer_remaining_seconds) > 0 && (((id(timer_remaining_seconds) + 1799) / 1800) & 0x8);
+          then:
+            - output.turn_on: timer_4h_indicator
+          else:
+            - output.turn_off: timer_4h_indicator
+
+  - id: cancel_timer
+    mode: single
+    then:
+      - globals.set:
+          id: timer_remaining_seconds
+          value: "0"
+      - script.execute: update_timer_indicators
+
+  - id: apply_timer_duration
+    mode: single
+    parameters:
+      minutes: int
+    then:
+      - lambda: |-
+          if (minutes <= 0) {
+            id(cancel_timer)->execute();
+            return;
+          }
+
+          if (!id(smart_fan).state) {
+            id(cancel_timer)->execute();
+            return;
+          }
+
+          id(timer_remaining_seconds) = minutes * 60;
+          id(update_timer_indicators)->execute();
+
+  - id: timer_button_cycle
+    mode: single
+    then:
+      - lambda: |-
+          int current = 0;
+          if (id(timer_remaining_seconds) > 0) {
+            current = ((id(timer_remaining_seconds) + 1799) / 1800) * 30;
+          }
+
+          int next = 30;
+
+          if (current >= 450) {
+            next = 0;
+          } else if (current > 0) {
+            next = current + 30;
+          }
+
+          id(apply_timer_duration)->execute(next);
 
 binary_sensor:
   - platform: gpio
@@ -94,6 +189,9 @@ binary_sensor:
       mode:
         input: true
         pullup: true
+    on_press:
+      then:
+        - script.execute: timer_button_cycle
 
   - platform: remote_receiver
     id: on_off_remote
@@ -123,6 +221,15 @@ binary_sensor:
     on_press:
       then:
         - script.execute: toggle_oscilating
+
+  - platform: remote_receiver
+    id: timer_remote
+    nec:
+      address: 0xFE01
+      command: 0xF40B
+    on_press:
+      then:
+        - script.execute: timer_button_cycle
 
 uart:
   - id: fan_uart
@@ -220,6 +327,25 @@ output:
     pin: GPIO21
     id: timer_4h_indicator
 
+number:
+  - platform: template
+    id: timer_duration_number
+    name: Fan Timer
+    unit_of_measurement: min
+    device_class: duration
+    mode: box
+    min_value: 0
+    max_value: 450
+    step: 30
+    optimistic: false
+    initial_value: 0
+    restore_value: false
+    set_action:
+      then:
+        - script.execute:
+            id: apply_timer_duration
+            minutes: !lambda "return (int) x;"
+
 fan:
   - platform: speed
     id: smart_fan
@@ -237,6 +363,11 @@ fan:
           format: "Fan preset mode was changed to %s!"
           args: [x.c_str()]
     on_state:
+      - if:
+          condition:
+            lambda: return !x->state;
+          then:
+            - script.execute: cancel_timer
       - uart.write:
           id: fan_uart
           data: !lambda |-
@@ -258,6 +389,28 @@ fan:
 
             // Fallback keeps compiler happy and sends OFF for unknown state combos.
             return { 0x5a, 0x40, 0x80, 0x20, 0x9f };
+
+interval:
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            lambda: return id(timer_remaining_seconds) > 0 && id(smart_fan).state;
+          then:
+            - lambda: |-
+                id(timer_remaining_seconds) -= 1;
+            - if:
+                condition:
+                  lambda: return id(timer_remaining_seconds) <= 0;
+                then:
+                  - fan.turn_off: smart_fan
+                  - script.execute: cancel_timer
+                else:
+                  - if:
+                      condition:
+                        lambda: return (id(timer_remaining_seconds) % 1800) == 0;
+                      then:
+                        - script.execute: update_timer_indicators
 
 remote_receiver:
   pin:
