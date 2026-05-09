@@ -1,0 +1,2 @@
+esphome==2025.7.5
+protobuf==5.29.5

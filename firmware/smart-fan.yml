@@ -1,0 +1,269 @@
+esphome:
+  name: smart-fan
+  friendly_name: Smart Fan
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: arduino
+
+# Enable logging
+logger:
+  level: DEBUG
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  output_power: 8.5dB
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: NONE
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Smart Fan Fallback Hotspot"
+    password: !secret ap_password
+
+captive_portal:
+
+script:
+  - id: toggle_oscilating
+    mode: queued
+    then:
+      - lambda: >-
+          auto oscilating = id(smart_fan).oscillating;
+          auto call = id(smart_fan).make_call();
+          call.set_oscillating(!oscilating);
+          call.perform();
+
+binary_sensor:
+  - platform: gpio
+    id: oscilating_button
+    pin:
+      number: GPIO34
+      mode:
+        input: true
+        pullup: true
+    on_press:
+      then:
+        - script.execute: toggle_oscilating
+
+  - platform: gpio
+    id: on_off_button
+    pin:
+      number: GPIO11
+      mode:
+        input: true
+        pullup: true
+    on_press:
+      then:
+        - fan.toggle: smart_fan
+
+  - platform: gpio
+    id: speed_button
+    pin:
+      number: GPIO10
+      mode:
+        input: true
+        pullup: true
+    on_press:
+      then:
+        - fan.cycle_speed:
+            id: smart_fan
+            off_speed_cycle: false
+
+  - platform: gpio
+    id: mode_button
+    pin:
+      number: GPIO9
+      mode:
+        input: true
+        pullup: true
+
+  - platform: gpio
+    id: timer_button
+    pin:
+      number: GPIO8
+      mode:
+        input: true
+        pullup: true
+
+  - platform: remote_receiver
+    id: on_off_remote
+    nec:
+      address: 0xFE01
+      command: 0xFC03
+    on_press:
+      then:
+        - fan.toggle: smart_fan
+
+  - platform: remote_receiver
+    id: speed_remote
+    nec:
+      address: 0xFE01
+      command: 0xF807
+    on_press:
+      then:
+        - fan.cycle_speed:
+            id: smart_fan
+            off_speed_cycle: false
+
+  - platform: remote_receiver
+    id: oscilating_remote
+    nec:
+      address: 0xFE01
+      command: 0xEC13
+    on_press:
+      then:
+        - script.execute: toggle_oscilating
+
+uart:
+  - id: fan_uart
+    rx_pin: GPIO44
+    tx_pin: GPIO43
+    baud_rate: 334
+    debug:
+      direction: BOTH
+      dummy_receiver: true
+      after:
+        bytes: 5
+      sequence:
+        - lambda: UARTDebug::log_hex(direction, bytes, ' ');
+
+output:
+  - platform: template
+    id: fan_speed
+    type: float
+    write_action:
+      - logger.log:
+          format: "The fan speed output has value %.5f"
+          args: ["state"]
+      - if:
+          condition:
+            lambda: return (state == 0);
+          then:
+            - output.turn_off: low_indicator
+            - output.turn_off: medium_indicator
+            - output.turn_off: high_indicator
+      - if:
+          condition:
+            lambda: return (state > 0 && state < .4);
+          then:
+            - output.turn_on: low_indicator
+            - output.turn_off: medium_indicator
+            - output.turn_off: high_indicator
+      - if:
+          condition:
+            lambda: return (state > .4 && state < .7);
+          then:
+            - output.turn_off: low_indicator
+            - output.turn_on: medium_indicator
+            - output.turn_off: high_indicator
+      - if:
+          condition:
+            lambda: return (state > .7);
+          then:
+            - output.turn_off: low_indicator
+            - output.turn_off: medium_indicator
+            - output.turn_on: high_indicator
+
+  - platform: template
+    id: oscilating
+    type: binary
+    write_action:
+      - logger.log: "Oscilating toggled"
+
+  - platform: gpio
+    pin: GPIO15
+    id: low_indicator
+
+  - platform: gpio
+    pin: GPIO18
+    id: medium_indicator
+
+  - platform: gpio
+    pin: GPIO19
+    id: high_indicator
+
+  - platform: gpio
+    pin: GPIO14
+    id: normal_indicator
+
+  - platform: gpio
+    pin: GPIO17
+    id: rhythm_indicator
+
+  - platform: gpio
+    pin: GPIO20
+    id: sleep_indicator
+
+  - platform: gpio
+    pin: GPIO12
+    id: timer_0_5h_indicator
+
+  - platform: gpio
+    pin: GPIO13
+    id: timer_1h_indicator
+
+  - platform: gpio
+    pin: GPIO16
+    id: timer_2h_indicator
+
+  - platform: gpio
+    pin: GPIO21
+    id: timer_4h_indicator
+
+fan:
+  - platform: speed
+    id: smart_fan
+    name: "Smart Fan"
+    output: fan_speed
+    oscillation_output: oscilating
+    speed_count: 3
+    restore_mode: ALWAYS_OFF
+    preset_modes:
+      - Sleep
+      - Nature
+      - Normal
+    on_preset_set:
+      - logger.log:
+          format: "Fan preset mode was changed to %s!"
+          args: [x.c_str()]
+    on_state:
+      - uart.write:
+          id: fan_uart
+          data: !lambda |-
+            if (!x->state) {
+              return { 0x5a, 0x40, 0x80, 0x20, 0x9f };
+            } else if (x->state && x->speed == 1 && !x->oscillating) {
+              return { 0x5a, 0xc0, 0x80, 0x20, 0x1f };
+            } else if (x->state && x->speed == 2 && !x->oscillating) {
+              return { 0x5a, 0xc0, 0x40, 0x20, 0xef };
+            } else if (x->state && x->speed == 3 && !x->oscillating) {
+              return { 0x5a, 0xc0, 0xc0, 0x20, 0x6f };
+            } else if (x->state && x->speed == 1 && x->oscillating) {
+              return { 0x5a, 0xc0, 0x80, 0xa0, 0xef };
+            } else if (x->state && x->speed == 2 && x->oscillating) {
+              return { 0x5a, 0xc0, 0x40, 0xa0, 0x6f };
+            } else if (x->state && x->speed == 3 && x->oscillating) {
+              return { 0x5a, 0xc0, 0xc0, 0xa0, 0xaf };
+            }
+
+            // Fallback keeps compiler happy and sends OFF for unknown state combos.
+            return { 0x5a, 0x40, 0x80, 0x20, 0x9f };
+
+remote_receiver:
+  pin:
+    number: GPIO7
+    inverted: true
+    mode:
+      input: true
+      pullup: true
+  dump: nec

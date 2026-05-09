@@ -1,0 +1,16 @@
+venv
+
+# KiCad
+*.kicad_prl
+fp-info-cache
+*-backups/
+fabrication-toolkit-options.json
+Gerber.zip
+
+# Generated files to ignore
+hardware/smart-fan.csv
+hardware/production/backups/
+hardware/production/*.zip
+
+# Firmware local component experiments (not used by this project)
+firmware/components/
